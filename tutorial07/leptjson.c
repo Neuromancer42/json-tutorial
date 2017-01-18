@@ -111,7 +111,7 @@ static const char* lept_parse_hex4(const char* p, unsigned* u) {
 }
 
 static void lept_encode_utf8(lept_context* c, unsigned u) {
-    if (u <= 0x7F) 
+    if (u <= 0x7F)
         PUTC(c, u & 0xFF);
     else if (u <= 0x7FF) {
         PUTC(c, 0xC0 | ((u >> 6) & 0xFF));
@@ -346,11 +346,105 @@ int lept_parse(lept_value* v, const char* json) {
     return ret;
 }
 
+#if 0
+// Unoptimized
 static void lept_stringify_string(lept_context* c, const char* s, size_t len) {
-    /* ... */
+    size_t i;
+    assert(s != NULL);
+    PUTC(c, '"');
+    for (i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        switch (ch) {
+            case '\"': PUTS(c, "\\\"", 2); break;
+            case '\\': PUTS(c, "\\\\", 2); break;
+            case '\b': PUTS(c, "\\b",  2); break;
+            case '\f': PUTS(c, "\\f",  2); break;
+            case '\n': PUTS(c, "\\n",  2); break;
+            case '\r': PUTS(c, "\\r",  2); break;
+            case '\t': PUTS(c, "\\t",  2); break;
+            default:
+                if (ch < 0x20) {
+                    char buffer[7];
+                    sprintf(buffer, "\\u%04X", ch);
+                    PUTS(c, buffer, 6);
+                }
+                else
+                    PUTC(c, s[i]);
+        }
+    }
+    PUTC(c, '"');
 }
+#else
+static void lept_stringify_string(lept_context* c, const char* s, size_t len) {
+    static const char hex_digits[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
+    size_t i, size;
+    char* head, *p;
+    assert(s != NULL);
+    p = head = lept_context_push(c, size = len * 6 + 2); /* "\u00xx..." */
+    *p++ = '"';
+    for (i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        switch (ch) {
+            case '\"': *p++ = '\\'; *p++ = '\"'; break;
+            case '\\': *p++ = '\\'; *p++ = '\\'; break;
+            case '\b': *p++ = '\\'; *p++ = 'b';  break;
+            case '\f': *p++ = '\\'; *p++ = 'f';  break;
+            case '\n': *p++ = '\\'; *p++ = 'n';  break;
+            case '\r': *p++ = '\\'; *p++ = 'r';  break;
+            case '\t': *p++ = '\\'; *p++ = 't';  break;
+            default:
+                if (ch >= 0x20 && ch <= 0x7F)
+                    *p++ = ch;
+                else {
+                    unsigned u, u2 = 0;
+                    if (ch < 0x20)
+                        u = (unsigned) ch;
+                    else if (ch <= 0xDF) {
+                        u = (unsigned)(ch & 0x1F) << 6;
+                        ch = s[++i];
+                        u = u | ((unsigned)(ch & 0x3F));
+                    }
+                    else if (ch <= 0xEF) {
+                        u = (unsigned)(ch & 0x0F) << 12;
+                        ch = s[++i];
+                        u = u | ((unsigned)(ch & 0x3F) << 6);
+                        ch = s[++i];
+                        u = u | ((unsigned)(ch & 0x3F));
+                    }
+                    else {
+                        u = (unsigned)(ch & 0x07) << 18;
+                        ch = s[++i];
+                        u = u | ((unsigned)(ch & 0x3F) << 12);
+                        ch = s[++i];
+                        u = u | ((unsigned)(ch & 0x3F) <<  6);
+                        ch = s[++i];
+                        u = u | ((unsigned)(ch & 0x3F));
+                        u -= 0x10000;
+                        u2 = (u & 0x3FF) + 0xDC00;
+                        u  = (u >> 10)   + 0xD800;
+                    }
+                    *p++ = '\\'; *p++ = 'u';
+                    *p++ = hex_digits[u >> 12];
+                    *p++ = hex_digits[(u >> 8) & 0xF];
+                    *p++ = hex_digits[(u >> 4) & 0xF];
+                    *p++ = hex_digits[u & 0xF];
+                    if (u2) {
+                        *p++ = '\\'; *p++ = 'u';
+                        *p++ = hex_digits[u2 >> 12];
+                        *p++ = hex_digits[(u2 >> 8) & 0xF];
+                        *p++ = hex_digits[(u2 >> 4) & 0xF];
+                        *p++ = hex_digits[u2 & 0xF];
+                    }
+                }
+        }
+    }
+    *p++ = '"';
+    c->top -= size - (p - head);
+}
+#endif
 
 static void lept_stringify_value(lept_context* c, const lept_value* v) {
+    size_t i;
     switch (v->type) {
         case LEPT_NULL:   PUTS(c, "null",  4); break;
         case LEPT_FALSE:  PUTS(c, "false", 5); break;
@@ -358,10 +452,24 @@ static void lept_stringify_value(lept_context* c, const lept_value* v) {
         case LEPT_NUMBER: c->top -= 32 - sprintf(lept_context_push(c, 32), "%.17g", v->u.n); break;
         case LEPT_STRING: lept_stringify_string(c, v->u.s.s, v->u.s.len); break;
         case LEPT_ARRAY:
-            /* ... */
+            PUTC(c, '[');
+            for (i = 0; i < v->u.a.size; i++) {
+                if (i > 0)
+                    PUTC(c, ',');
+                lept_stringify_value(c, &v->u.a.e[i]);
+            }
+            PUTC(c, ']');
             break;
         case LEPT_OBJECT:
-            /* ... */
+            PUTC(c, '{');
+            for (i = 0; i < v->u.o.size; i++) {
+                if (i > 0)
+                    PUTC(c, ',');
+                lept_stringify_string(c, v->u.o.m[i].k, v->u.o.m[i].klen);
+                PUTC(c, ':');
+                lept_stringify_value(c, &v->u.o.m[i].v);
+            }
+            PUTC(c, '}');
             break;
         default: assert(0 && "invalid type");
     }
